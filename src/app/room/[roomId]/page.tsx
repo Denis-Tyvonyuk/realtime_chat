@@ -2,11 +2,11 @@
 
 import { useUsername } from "@/hooks/use-username";
 import { client } from "@/lib/client";
+import { useRealtime } from "@/lib/realtime-client";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useRealtime } from "@upstash/realtime/client";
 import { format } from "date-fns";
-import { useParams } from "next/navigation";
-import { useRef, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 
 const formatTimeRemaining = (seconds: number) => {
   const mins = Math.floor(seconds / 60);
@@ -20,6 +20,8 @@ const Page = () => {
   const [timeRemaining, setTimeRemaining] = useState<number | null>(null);
   const [input, setInput] = useState("");
 
+  const router = useRouter();
+
   const inputRef = useRef<HTMLInputElement>(null);
 
   const { username } = useUsername();
@@ -27,7 +29,39 @@ const Page = () => {
   const params = useParams();
   const roomId = params.roomId as string;
 
-  const { data: messages } = useQuery({
+  const { data: ttlData } = useQuery({
+    queryKey: ["ttl", roomId],
+    queryFn: async () => {
+      const res = await client.room.ttl.get({ query: { roomId } });
+      return res.data;
+    },
+  });
+
+  useEffect(() => {
+    if (ttlData?.ttl !== undefined) setTimeRemaining(ttlData.ttl);
+  }, [ttlData]);
+
+  useEffect(() => {
+    if (timeRemaining === null || timeRemaining < 0) return;
+
+    if (timeRemaining === 0) {
+      router.push("/?destroyed=true");
+      return;
+    }
+
+    const interval = setInterval(() => {
+      setTimeRemaining((prev) => {
+        if (prev === null || prev <= 1) {
+          clearInterval(interval);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [timeRemaining, router]);
+
+  const { data: messages, refetch } = useQuery({
     queryKey: ["messages", roomId],
     queryFn: async () => {
       const res = await client.messages.get({
@@ -43,10 +77,30 @@ const Page = () => {
         { sender: username, text },
         { query: { roomId } },
       );
+
+      setInput("");
     },
   });
 
-  useRealtime;
+  useRealtime({
+    channels: [roomId],
+    events: ["chat.destroy", "chat.message"],
+    onData: ({ event }) => {
+      if (event === "chat.message") {
+        refetch();
+      }
+
+      if (event === "chat.destroy") {
+        router.push("/?destroyed=true");
+      }
+    },
+  });
+
+  const { mutate: destroyRoom } = useMutation({
+    mutationFn: async () => {
+      await client.room.delete(null, { query: { roomId } });
+    },
+  });
 
   const copyLink = () => {
     const url = window.location.href;
@@ -97,6 +151,9 @@ const Page = () => {
           className="text-xs bg-zinc-800 hover:bg-red-600 px-3 py-1.5 rounded 
         text-zinc-400 hover:text-white font-bold transition-all 
         group flex items-center gap-2 disabled:opacity-50"
+          onClick={() => {
+            destroyRoom();
+          }}
         >
           <span className="group-hover:animate-pulse">X</span>
           DESTROY NOW
